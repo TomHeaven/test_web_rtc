@@ -109,6 +109,12 @@ class WebRTCBroadcaster:
                 
                 elif msg_type == 'new_viewer':
                     logger.info("收到 new_viewer 消息，准备重新发送 offer")
+                    # 如果有旧的连接，先清理
+                    if self.webrtc:
+                        logger.info("清理旧的WebRTC连接")
+                        self.webrtc.release()
+                        self.webrtc = None
+                    # 重新发送offer
                     await self.send_offer()
                     
         except websockets.exceptions.ConnectionClosed:

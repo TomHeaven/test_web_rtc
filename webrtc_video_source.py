@@ -436,7 +436,29 @@ class WebRTCWithVideoSource:
     
     def release(self):
         """释放资源"""
-        self.video_source.release()
+
+        if self.video_track:
+            self.video_track.stop()
+            self.video_track = None
+        
+        # 关闭数据通道
+        if self.data_channel and self.data_channel.readyState != "closed":
+            self.data_channel.close()
+        
+        # 关闭peer connection
+        if self.pc:
+            # 创建一个任务来关闭连接，但不等待它
+            asyncio.create_task(self._close_pc())
+        
+    def _close_pc(self):
+        """异步关闭peer connection"""
+        async def close():
+            try:
+                await self.pc.close()
+            except Exception as e:
+                print(f"关闭PeerConnection出错: {e}")
+        
+        return close()
 
 
 # 使用示例
