@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Video Receiver</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        video {
+            width: 100%;
+            max-width: 1280px;
+            border: 2px solid #333;
+            border-radius: 8px;
+        }
+        .controls {
+            margin: 20px 0;
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .metadata {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .data-panel {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .data-panel h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .connected {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .disconnected {
+            background-color: #f44336;
+            color: white;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            background-color: #008CBA;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #007399;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebRTC Video Receiver</h1>
+        
+        <div class="controls">
+            <h2>连接状态</h2>
+            <div>
+                <span id="connectionStatus" class="status disconnected">未连接</span>
+                <span id="dataChannelStatus" class="status disconnected">数据通道未连接</span>
+            </div>
+            <div style="margin-top: 10px;">
+                <button id="connectBtn" onclick="connect()">连接</button>
+                <button id="disconnectBtn" onclick="disconnect()" disabled>断开</button>
+                <button id="clearMetadataBtn" onclick="clearMetadata()">清除数据</button>
+            </div>
+            <div style="margin-top: 10px;">
+                <label>信令服务器: </label>
+                <input type="text" id="serverUrl" value="ws://localhost:8765/?role=viewer" size="40">
+            </div>
+        </div>
+        
+        <video id="video" autoplay playsinline muted></video>
+        
+        <div class="metadata">
+            <div class="data-panel">
+                <h3>目标位置</h3>
+                <div id="targetInfo">
+                    <p>等待数据...</p>
+                </div>
+            </div>
+            
+            <div class="data-panel">
+                <h3>无人机遥测</h3>
+                <div id="telemetryInfo">
+                    <p>等待数据...</p>
+                </div>
+            </div>
+            
+            <div class="data-panel">
+                <h3>跟踪信息</h3>
+                <div id="trackingInfo">
+                    <p>等待数据...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let pc = null;
+        let dc = null;
+        let ws = null;
+        let videoElement = document.getElementById('video');
+        
+        // 存储接收到的数据
+        let targetPositions = [];
+        let telemetry = {};
+        let tracking = {};
+        
+        function updateUI() {
+            // 更新目标信息
+            if (targetPositions.length > 0) {
+                let latest = targetPositions[targetPositions.length - 1];
+                document.getElementById('targetInfo').innerHTML = `
+                    <p><strong>位置:</strong> (${latest.position[0]}, ${latest.position[1]})</p>
+                    <p><strong>置信度:</strong> ${(latest.confidence * 100).toFixed(1)}%</p>
+                    <p><strong>时间戳:</strong> ${new Date(latest.timestamp * 1000).toLocaleTimeString()}</p>
+                    <p><strong>历史记录:</strong> ${targetPositions.length} 个点</p>
+                `;
+            }
+            
+            // 更新遥测信息
+            if (Object.keys(telemetry).length > 0) {
+                document.getElementById('telemetryInfo').innerHTML = `
+                    <p><strong>高度:</strong> ${telemetry.altitude?.toFixed(1) || 'N/A'} m</p>
+                    <p><strong>速度:</strong> ${telemetry.speed?.toFixed(1) || 'N/A'} m/s</p>
+                    <p><strong>电量:</strong> ${telemetry.battery?.toFixed(1) || 'N/A'}%</p>
+                    <p><strong>GPS:</strong> ${telemetry.gps ? 
+                        `(${telemetry.gps.lat.toFixed(4)}, ${telemetry.gps.lon.toFixed(4)})` : 'N/A'}</p>
+                `;
+            }
+            
+            // 更新跟踪信息
+            if (Object.keys(tracking).length > 0) {
+                document.getElementById('trackingInfo').innerHTML = `
+                    <p><strong>算法:</strong> ${tracking.algorithm || 'N/A'}</p>
+                    <p><strong>FPS:</strong> ${tracking.fps || 'N/A'}</p>
+                    <p><strong>延迟:</strong> ${tracking.latency ? (tracking.latency * 1000).toFixed(0) + 'ms' : 'N/A'}</p>
+                `;
+            }
+        }
+        
+        async function connect() {
+            let serverUrl = document.getElementById('serverUrl').value;
+            
+            try {
+                // 连接信令服务器
+                ws = new WebSocket(serverUrl);
+                
+                ws.onopen = () => {
+                    console.log('WebSocket连接已打开');
+                    document.getElementById('connectionStatus').className = 'status connected';
+                    document.getElementById('connectionStatus').textContent = '已连接';
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('disconnectBtn').disabled = false;
+                };
+                
+                ws.onmessage = async (event) => {
+                    const data = JSON.parse(event.data);
+                    console.log('收到信令消息:', data.type);
+                    
+                    if (data.type === 'offer') {
+                        await handleOffer(data);
+                    } else if (data.type === 'ice_candidate') {
+                        await pc.addIceCandidate(data.candidate);
+                    }
+                };
+                
+                ws.onclose = () => {
+                    console.log('WebSocket连接关闭');
+                    disconnect();
+                };
+                
+            } catch (e) {
+                console.error('连接失败:', e);
+                alert('连接失败: ' + e.message);
+            }
+        }
+        
+        async function handleOffer(data) {
+            // 创建RTCPeerConnection
+            pc = new RTCPeerConnection();
+            
+            // 处理ICE候选
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({
+                        type: 'ice_candidate',
+                        candidate: event.candidate
+                    }));
+                }
+            };
+            
+            // 处理连接状态变化
+            pc.onconnectionstatechange = () => {
+                console.log('连接状态:', pc.connectionState);
+                if (pc.connectionState === 'connected') {
+                    document.getElementById('connectionStatus').className = 'status connected';
+                    document.getElementById('connectionStatus').textContent = '已连接';
+                }
+            };
+            
+            // 处理数据通道
+            pc.ondatachannel = (event) => {
+                console.log('收到数据通道:', event.channel.label);
+                dc = event.channel;
+                setupDataChannel(dc);
+            };
+            
+            // 处理视频轨道
+            pc.ontrack = (event) => {
+                console.log('收到轨道:', event.track.kind);
+                if (event.track.kind === 'video') {
+                    videoElement.srcObject = event.streams[0];
+                }
+            };
+            
+            // 设置远程描述
+            await pc.setRemoteDescription(data.sdp);
+            
+            // 创建应答
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            
+            // 发送应答
+            ws.send(JSON.stringify({
+                type: 'answer',
+                sdp: pc.localDescription
+            }));
+        }
+        
+        function setupDataChannel(channel) {
+            document.getElementById('dataChannelStatus').className = 'status connected';
+            document.getElementById('dataChannelStatus').textContent = '数据通道已连接';
+            
+            channel.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                const type = data.type;
+                
+                if (type === 'target_position') {
+                    targetPositions.push({
+                        position: data.position,
+                        confidence: data.confidence,
+                        timestamp: data.timestamp
+                    });
+                    // 保留最近100个点
+                    if (targetPositions.length > 100) {
+                        targetPositions = targetPositions.slice(-100);
+                    }
+                } else if (type === 'drone_telemetry') {
+                    telemetry = data;
+                } else if (type === 'tracking_info') {
+                    tracking = data;
+                }
+                
+                updateUI();
+            };
+            
+            channel.onopen = () => {
+                console.log('数据通道已打开');
+            };
+            
+            channel.onclose = () => {
+                console.log('数据通道已关闭');
+                document.getElementById('dataChannelStatus').className = 'status disconnected';
+                document.getElementById('dataChannelStatus').textContent = '数据通道已断开';
+            };
+        }
+        
+        function disconnect() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            videoElement.srcObject = null;
+            
+            document.getElementById('connectionStatus').className = 'status disconnected';
+            document.getElementById('connectionStatus').textContent = '未连接';
+            document.getElementById('dataChannelStatus').className = 'status disconnected';
+            document.getElementById('dataChannelStatus').textContent = '数据通道未连接';
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+        }
+        
+        function clearMetadata() {
+            targetPositions = [];
+            telemetry = {};
+            tracking = {};
+            updateUI();
+        }
+        
+        // 页面关闭前断开连接
+        window.addEventListener('beforeunload', () => {
+            disconnect();
+        });
+    </script>
+</body>
+</html>
