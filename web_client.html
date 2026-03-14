@@ -208,56 +208,129 @@
         }
         
         async function handleOffer(data) {
-            // 创建RTCPeerConnection
-            pc = new RTCPeerConnection();
-            
-            // 处理ICE候选
-            pc.onicecandidate = (event) => {
-                if (event.candidate) {
-                    ws.send(JSON.stringify({
-                        type: 'ice_candidate',
-                        candidate: event.candidate
-                    }));
+            try {
+                // 创建RTCPeerConnection
+                pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
+                });
+                
+                // 处理ICE候选 - 修正格式以匹配Python端
+                pc.onicecandidate = (event) => {
+                    if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                        // 提取 candidate 的各个字段
+                        const candidate = event.candidate;
+                        
+                        // 发送格式与Python端完全一致
+                        ws.send(JSON.stringify({
+                            type: 'ice_candidate',
+                            candidate: event.candidate  // 直接发送整个对象
+                        }));
+                        
+                        console.log('发送ICE候选:', event.candidate);
+                    }
+                };
+                
+                // 处理ICE连接状态变化
+                pc.oniceconnectionstatechange = () => {
+                    console.log('ICE连接状态:', pc.iceConnectionState);
+                    if (pc.iceConnectionState === 'connected') {
+                        document.getElementById('connectionStatus').className = 'status connected';
+                        document.getElementById('connectionStatus').textContent = '已连接';
+                    } else if (pc.iceConnectionState === 'disconnected' || 
+                            pc.iceConnectionState === 'failed') {
+                        document.getElementById('connectionStatus').className = 'status disconnected';
+                        document.getElementById('connectionStatus').textContent = 'ICE连接断开';
+                    }
+                };
+                
+                // 处理连接状态变化
+                pc.onconnectionstatechange = () => {
+                    console.log('连接状态:', pc.connectionState);
+                };
+                
+                // 处理ICE收集状态
+                pc.onicegatheringstatechange = () => {
+                    console.log('ICE收集状态:', pc.iceGatheringState);
+                };
+                
+                // 处理数据通道
+                pc.ondatachannel = (event) => {
+                    console.log('收到数据通道:', event.channel.label);
+                    dc = event.channel;
+                    setupDataChannel(dc);
+                };
+                
+                // 处理视频轨道
+                pc.ontrack = (event) => {
+                    console.log('收到轨道:', event.track.kind);
+                    if (event.track.kind === 'video') {
+                        videoElement.srcObject = event.streams[0];
+                    }
+                };
+                
+                // 设置远程描述
+                console.log('设置远程描述:', data.sdp.type);
+                await pc.setRemoteDescription(data.sdp);
+                
+                // 创建应答
+                console.log('创建应答...');
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                
+                // 发送应答 - 确保格式正确
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    const answerData = {
+                        type: 'answer',
+                        sdp: {
+                            type: pc.localDescription.type,
+                            sdp: pc.localDescription.sdp
+                        }
+                    };
+                    console.log('发送应答');
+                    ws.send(JSON.stringify(answerData));
+                } else {
+                    console.error('WebSocket未连接，无法发送answer');
                 }
-            };
-            
-            // 处理连接状态变化
-            pc.onconnectionstatechange = () => {
-                console.log('连接状态:', pc.connectionState);
-                if (pc.connectionState === 'connected') {
-                    document.getElementById('connectionStatus').className = 'status connected';
-                    document.getElementById('connectionStatus').textContent = '已连接';
-                }
-            };
-            
-            // 处理数据通道
-            pc.ondatachannel = (event) => {
-                console.log('收到数据通道:', event.channel.label);
-                dc = event.channel;
-                setupDataChannel(dc);
-            };
-            
-            // 处理视频轨道
-            pc.ontrack = (event) => {
-                console.log('收到轨道:', event.track.kind);
-                if (event.track.kind === 'video') {
-                    videoElement.srcObject = event.streams[0];
-                }
-            };
-            
-            // 设置远程描述
-            await pc.setRemoteDescription(data.sdp);
-            
-            // 创建应答
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            
-            // 发送应答
-            ws.send(JSON.stringify({
-                type: 'answer',
-                sdp: pc.localDescription
-            }));
+                
+            } catch (e) {
+                console.error('处理offer失败:', e);
+                showError('处理offer失败: ' + e.message);
+            }
         }
+        
+        // 同时也要修正接收ICE candidate的部分
+        // 在 ws.onmessage 中：
+        ws.onmessage = async (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('收到信令消息:', data.type);
+                
+                if (data.type === 'offer') {
+                    await handleOffer(data);
+                } else if (data.type === 'ice_candidate') {
+                    if (pc) {
+                        // 从接收到的数据创建RTCIceCandidate对象
+                        const candidateData = data.candidate;
+                        const candidate = new RTCIceCandidate({
+                            candidate: candidateData.candidate,
+                            sdpMid: candidateData.sdpMid,
+                            sdpMLineIndex: candidateData.sdpMLineIndex
+                        });
+                        await pc.addIceCandidate(candidate);
+                        console.log('添加ICE候选成功');
+                    } else {
+                        console.warn('收到ICE candidate但pc不存在');
+                    }
+                } else if (data.type === 'status') {
+                    console.log('服务器状态:', data);
+                }
+            } catch (e) {
+                console.error('处理消息失败:', e);
+            }
+        };
         
         function setupDataChannel(channel) {
             document.getElementById('dataChannelStatus').className = 'status connected';

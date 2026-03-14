@@ -4,6 +4,7 @@ import json
 import websockets
 from webrtc_video_source import WebRTCWithVideoSource
 from aiortc import RTCSessionDescription
+from aiortc import RTCIceCandidate
 import logging
 import os
 
@@ -47,12 +48,13 @@ class WebRTCBroadcaster:
     async def handle_signaling_messages(self):
         """处理信令消息"""
         try:
+        # if True:
             async for message in self.websocket:
                 data = json.loads(message)
                 msg_type = data.get('type')
                 
                 logger.info(f"收到信令消息: {msg_type}")
-                
+                logger.info(f'DEBUG: data {data}')
                 if msg_type == 'answer':
                     # 收到viewer的answer
                     if self.webrtc and self.webrtc.pc:
@@ -65,8 +67,45 @@ class WebRTCBroadcaster:
                 elif msg_type == 'ice_candidate':
                     # 收到ICE候选
                     if self.webrtc and self.webrtc.pc:
-                        await self.webrtc.pc.addIceCandidate(data['candidate'])
-                        logger.info("已添加ICE候选")
+                        cand = data['candidate']
+                    logger.debug(f"收到ICE候选: {cand}")
+                    
+                    # 从ICE candidate字符串解析各个字段
+                    # candidate字符串格式通常为：
+                    # "candidate: foundation component protocol priority ip port type ..."
+                    candidate_str = cand.get('candidate', '')
+                    
+                    # 解析candidate字符串
+                    parts = candidate_str.split()
+                    if len(parts) >= 8:
+                        # 基础格式: candidate foundation component protocol priority ip port type
+                        foundation = parts[0].split(':')[1] if parts[0].startswith('candidate:') else parts[0]
+                        component = int(parts[1])
+                        protocol = parts[2]
+                        priority = int(parts[3])
+                        ip = parts[4]
+                        port = int(parts[5])
+                        cand_type = parts[6]  # typ
+                        
+                        # 创建 RTCIceCandidate 对象
+                        candidate = RTCIceCandidate(
+                            component=component,
+                            foundation=foundation,
+                            ip=ip,
+                            port=port,
+                            priority=priority,
+                            protocol=protocol.upper(),  # 'UDP' 或 'TCP'
+                            relatedAddress=cand.get('relatedAddress'),
+                            relatedPort=cand.get('relatedPort'),
+                            tcpType=cand.get('tcpType'),
+                            type=cand_type
+                        )
+                        candidate.sdpMid = str(cand.get('sdpMid'))
+                        candidate.sdpMLineIndex = str(cand.get('sdpMLineIndex'))
+                        await self.webrtc.pc.addIceCandidate(candidate)
+                        logger.info(f"已添加ICE候选: {cand_type} {ip}:{port}")
+                    else:
+                        logger.error(f"无法解析ICE candidate: {candidate_str}")
                 
                 elif msg_type == 'new_viewer':
                     logger.info("收到 new_viewer 消息，准备重新发送 offer")
@@ -90,6 +129,7 @@ class WebRTCBroadcaster:
                 async def on_icecandidate(candidate):
                     if candidate and self.websocket:
                         logger.info(f"生成ICE候选: {candidate.candidate[:50]}...")  # 添加日志
+                        logger.info('f DEBUG: candidate {candidate}')
                         await self.websocket.send(json.dumps({
                             'type': 'ice_candidate',
                             'candidate': {
